@@ -18,15 +18,17 @@ const (
 const (
 	clfConfigPath           = "config-path"
 	clfReceiveProxyProtocol = "receive-proxy-protocol"
-    clfPrometheusEnabled    = "enable-prometheus"
-    clfPrometheusBind       = "prometheus-bind"
+	clfPrometheusEnabled    = "enable-prometheus"
+	clfPrometheusBind       = "prometheus-bind"
+	clfPostgresURL          = "postgres-url"
 )
 
 var (
 	configPath           = "./configs"
 	receiveProxyProtocol = false
-    prometheusEnabled    = false
-    prometheusBind       = ":9100"
+	prometheusEnabled    = false
+	prometheusBind       = ":9100"
+	postgresURL          = ""
 )
 
 func envBool(name string, value bool) bool {
@@ -60,8 +62,9 @@ func initEnv() {
 func initFlags() {
 	flag.StringVar(&configPath, clfConfigPath, configPath, "path of all proxy configs")
 	flag.BoolVar(&receiveProxyProtocol, clfReceiveProxyProtocol, receiveProxyProtocol, "should accept proxy protocol")
-    flag.BoolVar(&prometheusEnabled, clfPrometheusEnabled, prometheusEnabled, "should run prometheus client exposing metrics")
-    flag.StringVar(&prometheusBind, clfPrometheusBind, prometheusBind, "bind address and/or port for prometheus")
+	flag.BoolVar(&prometheusEnabled, clfPrometheusEnabled, prometheusEnabled, "should run prometheus client exposing metrics")
+	flag.StringVar(&prometheusBind, clfPrometheusBind, prometheusBind, "bind address and/or port for prometheus")
+	flag.StringVar(&postgresURL, clfPostgresURL, postgresURL, "address to use for connecting to postgres I.E. `dbname=exampledb user=webapp password=webapp`")
 	flag.Parse()
 }
 
@@ -79,6 +82,14 @@ func main() {
 		return
 	}
 
+	psCfgs, err := infrared.LoadProxiesFromPsql(postgresURL)
+	if err != nil {
+		log.Printf("Failed loading proxy configs from database with error: %s", err)
+		return
+	}
+
+	cfgs = append(cfgs, psCfgs...)
+
 	var proxies []*infrared.Proxy
 	for _, cfg := range cfgs {
 		proxies = append(proxies, &infrared.Proxy{
@@ -91,6 +102,13 @@ func main() {
 		if err := infrared.WatchProxyConfigFolder(configPath, outCfgs); err != nil {
 			log.Println("Failed watching config folder; error:", err)
 			log.Println("SYSTEM FAILURE: CONFIG WATCHER FAILED")
+		}
+	}()
+
+	go func() {
+		if err := infrared.WatchPsqlConfig(postgresURL, outCfgs); err != nil {
+			log.Println("Failed watching database with error:", err)
+			log.Println("SYSTEM FAILURE: DATABASE CONFIG WATCHER FAILED")
 		}
 	}()
 

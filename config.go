@@ -2,9 +2,11 @@ package infrared
 
 import (
 	"bufio"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/lib/pq"
 	"io/ioutil"
 	"log"
 	"net"
@@ -189,7 +191,7 @@ func DefaultProxyConfig() ProxyConfig {
 			Timeout:   300000,
 		},
 		OfflineStatus: StatusConfig{
-			VersionName:    "Infrared 1.17",
+			VersionName:    "",
 			ProtocolNumber: 755,
 			MaxPlayers:     20,
 			MOTD:           "Powered by Infrared",
@@ -409,4 +411,87 @@ func WatchProxyConfigFolder(path string, out chan *ProxyConfig) error {
 			log.Printf("Failed watching %s; error %s", path, err)
 		}
 	}
+}
+
+func LoadProxiesFromPsql(connectionString string) ([]*ProxyConfig, error) {
+	c, err := sql.Open("postgres", connectionString)
+	if err != nil {
+		return nil, err
+	}
+
+	r, err := c.Query("SELECT config FROM proxies")
+	if err != nil {
+		return nil, err
+	}
+	proxies := []*ProxyConfig{}
+	for r.Next() {
+		var text []byte
+		err = r.Scan(&text)
+		if err != nil {
+			return nil, err
+		}
+		var conf ProxyConfig
+		if err := json.Unmarshal(text, &conf); err != nil {
+			return nil, err
+		}
+
+		proxies = append(proxies, &conf)
+	}
+
+	return proxies, nil
+}
+
+func WatchPsqlConfig(connectionString string, out chan *ProxyConfig) error {
+
+	_, err := sql.Open("postgres", connectionString)
+	if err != nil {
+		panic(err)
+	}
+
+	reportProblem := func(ev pq.ListenerEventType, err error) {
+		if err != nil {
+			fmt.Println(err.Error())
+		}
+	}
+
+	listener := pq.NewListener(connectionString, 10*time.Second, time.Minute, reportProblem)
+	err = listener.Listen("events")
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println("Start monitoring PostgreSQL...")
+	for {
+		select {
+		case n := <-listener.Notify:
+			var conf ProxyConfig
+			var event PSEvent
+			err := json.Unmarshal([]byte(n.Extra), &event)
+			if err != nil {
+				fmt.Println("Error unmarshaling event: %s", err)
+				continue
+			}
+
+			err = json.Unmarshal(event.data, &conf)
+			if err != nil {
+				fmt.Println("Error unmarshaling config: %s", err)
+				continue
+			}
+			out <- &conf
+
+		case <-time.After(90 * time.Second):
+			fmt.Println("Received no events for 90 seconds, checking connection")
+			go func() {
+				listener.Ping()
+			}()
+			continue
+		}
+	}
+	return nil
+}
+
+type PSEvent struct {
+	table  string
+	action string
+	data   []byte
 }
